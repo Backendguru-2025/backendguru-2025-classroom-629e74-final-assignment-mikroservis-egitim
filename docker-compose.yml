@@ -1,0 +1,325 @@
+services:
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: keycloak
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KEYCLOAK_DATABASE_VENDOR: dev-file
+      KEYCLOAK_EXTRA_ARGS: --health-enabled=true
+#      KEYCLOAK_HOSTNAME: keycloak
+#      KEYCLOAK_PROXY_ADDRESS_FORWARDING: true
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+#    healthcheck: # Added healthcheck
+#      test: [ "CMD", "curl", "-fsS", "http://localhost:9000/health/ready" ]
+#      interval: 20s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 40s
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.1 # Güncel stabil bir sürüm kullanılıyor
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    depends_on:
+#      - elasticsearch
+      - mysql-db
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  kafka:
+    image: confluentinc/cp-kafka:7.9.1 # Güncel stabil bir sürüm kullanılıyor
+    container_name: kafka
+    ports:
+      - "9092:9092" # Docker ağı dışındaki istemciler için
+      - "29092:29092" # Docker ağı içindeki istemciler için (örn. diğer konteynerler)
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1 # Confluent'e özgü
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1 # Confluent'e özgü
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1             # Confluent'e özgü
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1  # Confluent'e özgü
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+#  akhq:
+#    image: tchiotludo/akhq:latest
+#    container_name: akhq
+#    ports:
+#      - "8988:8080" # AKHQ UI, ana makine portu 8088'de erişilebilir olacak
+#    environment:
+#      AKHQ_CONFIGURATION: |
+#        akhq:
+#          connections:
+#            docker-kafka-cluster:
+#              properties:
+#                bootstrap.servers: "kafka:29092" # AKHQ için Kafka dahili Docker ağ adresi
+#    depends_on:
+#      - kafka
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 256M
+
+#  elasticsearch:
+#    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+#    environment:
+#      - discovery.type=single-node
+#      - xpack.security.enabled=false
+#      - ES_JAVA_OPTS=-Xms1G -Xmx1G
+#    ulimits:
+#      memlock: { soft: -1, hard: -1 }
+#    ports:
+#      - "9200:9200"
+#    healthcheck:
+#      test:         [
+#        "CMD-SHELL",
+#        "curl -fs http://localhost:9200/_cluster/health | \
+#           grep -E '\"status\":\"(yellow|green)\"'"
+#      ]
+#      interval: 30s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 30s
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 2048M
+#
+#  logstash:
+#    image: docker.elastic.co/logstash/logstash:8.13.4
+#    depends_on:
+#      elasticsearch:
+#        condition: service_healthy
+#    ports:
+#      - "5000:5000"
+#      - "9600:9600"
+#    environment:
+#      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+#    volumes:
+#      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+#    healthcheck:
+#      test: [ "CMD-SHELL", "curl -s -f http://localhost:9600 || exit 1" ]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 5
+#      start_period: 30s
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 1024M
+#
+#  kibana:
+#    image: docker.elastic.co/kibana/kibana:8.13.4
+#    container_name: kibana
+#    depends_on:
+#      elasticsearch:
+#        condition: service_healthy
+#    environment:
+#      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+#    ports:
+#      - "5601:5601"
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 512M
+#
+  zipkin-server:
+    image: openzipkin/zipkin:3.4
+    ports:
+      - "9411:9411"
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://localhost:9411/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  config-server:
+    build: ./config-server # Path to Dockerfile context
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./config-server/config-repo:/etc/config-repo # Mount your local config-repo
+      # Ensure Config Server's search-locations points to /etc/config-repo
+    environment:
+      # If config server's search-locations is parameterized or needs env var
+      - SPRING_CLOUD_CONFIG_SERVER_NATIVE_SEARCH_LOCATIONS=file:///etc/config-repo
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8888/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - mysql-db
+      - eureka-server
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "9080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - user-service
+      - product-service
+      - order-service
+      - keycloak
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  eureka-server:
+    build: ./eureka-server
+    ports:
+      - "8761:8761"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8761/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+#  eureka-client:
+#    build: ./client
+#    depends_on:
+#      - eureka-server
+
+  product-service: # 'product-service' adında bir servis tanımlar
+    build: ./product-service #'product-service' klasorundeki Dockerfile built eder.
+                              # Bu imaj Dockerfile'ınız kullanılarak oluşturulmuş olmalıdır
+    ports:
+      - "8088:8080" # Ana makinedeki 8088 portunu konteynerdeki 8080 portuna eşler
+                      # (Spring Boot varsayılan portu 8080'dir)
+    environment:
+      # MySQL için Spring Boot veri kaynağı (datasource) yapılandırması
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql-db:3306/productservicedb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=cokgizlisifre
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update # veya üretimde 'validate'; 'create-drop' genellikle H2 içindir
+      - SPRING_JPA_DATABASE-PLATFORM=org.hibernate.dialect.MySQLDialect # MySQL dialect'ini belirtir
+    depends_on:
+      - eureka-server
+      - mysql-db # Docker Compose'a, product-service'ten önce mysql-db'yi başlatmasını söyler
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  user-service:
+    build: ./user-service
+    ports:
+      - "8089:8080"
+    depends_on:
+      - eureka-server
+      - mysql-db
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  order-service:
+    build: ./order-service
+    environment:
+      - LOGSTASH_HOST=logstash
+      - LOGSTASH_PORT=5000
+    ports:
+      - "8090:8080"
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+#      logstash:
+#        condition: service_healthy
+      zipkin-server:
+        condition: service_healthy
+#      keycloak:
+#        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+#  notification-service:
+#    build: ./notification-service
+#    ports:
+#      - "8091:8080"
+#    environment:
+#      # MySQL için Spring Boot veri kaynağı (datasource) yapılandırması
+#      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql-db:3306/notificationservicedb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+#      - SPRING_DATASOURCE_USERNAME=root
+#      - SPRING_DATASOURCE_PASSWORD=cokgizlisifre
+#      - SPRING_JPA_HIBERNATE_DDL_AUTO=update # veya üretimde 'validate'; 'create-drop' genellikle H2 içindir
+#      - SPRING_JPA_DATABASE-PLATFORM=org.hibernate.dialect.MySQLDialect # MySQL dialect'ini belirtir
+#    depends_on:
+#      eureka-server:
+#        condition: service_healthy
+#      mysql-db:
+#        condition: service_healthy
+#
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 256M
+
+  mysql-db: # 'mysql-db' adında bir MySQL servisi tanımlar
+    image: mysql:8.0 # Resmi bir MySQL imajını kullanır
+    ports:
+      - "33061:3306" # Ana makine portu 33061'i konteyner portu 3306'ya eşler (DB'ye dışarıdan erişim için isteğe bağlı)
+    environment:
+      - MYSQL_ROOT_PASSWORD=cokgizlisifre
+      - MYSQL_DATABASE=defaultdb
+    volumes:
+      - mysql_data:/var/lib/mysql # MySQL verilerini kalıcı hale getirir
+      - ./init:/docker-entrypoint-initdb.d
+
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost", "-uroot", "-pcokgizlisifre"]
+      timeout: 20s
+      retries: 10
+
+volumes:
+  mysql_data: # Veri kalıcılığı için adlandırılmış bir volume tanımlar
